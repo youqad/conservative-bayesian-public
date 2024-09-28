@@ -45,10 +45,10 @@ class Guardrail:
     def p_harm_given_theory(self, action):
 
         arm_features = self.agent.env.unwrapped.arm_features[action].float().to(self.agent.device)
-        reward_means = (self.hypotheses @ arm_features)
+        reward_means = (self.agent.hypotheses @ arm_features)
         std_dev = self.agent.env.unwrapped.sigma_r
-        p_harm = 1 - 0.5 * (1 + t.erf((self.agent.env.unwrapped.explosion_threshold - reward_means) / (std_dev * np.sqrt(2))))
-        return p_harm
+        p_harm_given_theories = 1 - 0.5 * (1 + t.erf((self.agent.env.unwrapped.explosion_threshold - reward_means) / (std_dev * np.sqrt(2))))
+        return p_harm_given_theories
 
     def p_harm_given_single_theory(self, theory, action):
         arm_features = self.agent.env.unwrapped.arm_features[action].float()
