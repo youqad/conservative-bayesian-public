@@ -48,11 +48,7 @@ class ExplodingBandit(gym.Env):
         super().reset()
         self.reward_weights = t.randint(0, self.k, size=(self.d_arm,))
         self.arm_features = t.randint(0, self.k, size=(self.n_arm, self.d_arm))
-        self.reward_means = einops.einsum(
-            self.reward_weights.float(),
-            self.arm_features.float(),
-            "d_arm, n_arm d_arm -> n_arm",
-        )
+        self.reward_means = t.matmul(self.arm_features.float(), self.reward_weights.float())
         self.total_reward = 0
         if self.fixed_explosion_threshold is not None:
             self.explosion_threshold = self.fixed_explosion_threshold

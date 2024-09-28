@@ -42,6 +42,7 @@ class Bayesian(Agent):
     ):
         super().__init__(env_id, env)
         self.name = name
+        self.device = t.device('cuda' if t.cuda.is_available() else 'cpu')
 
         guardrails = {
             "cheating": CheatingGuardrail(self, threshold),
@@ -63,36 +64,30 @@ class Bayesian(Agent):
         self.k = self.env.unwrapped.k
         self.episode_rejections = 0
         self.actions_rejected_this_timestep = []
+        self.num_hypotheses = self.k**self.d_arm
 
         # The agent is given the correct prior over the reward weights, which is the uniform over {0, ..., k-1}^d.
         # There are k^d possible reward weight vectors, which we index from 0 to k^d - 1.
-        prior = t.ones(self.k**self.d_arm) / (self.k**self.d_arm)
+        prior = t.ones(self.num_hypotheses, device=self.device) / (self.num_hypotheses)
         assert t.isclose(prior.sum(), t.tensor(1.0))
         self.log_prior = t.log(prior)
         ranges = [t.arange(self.k) for _ in range(self.d_arm)]
-        self.hypotheses = t.cartesian_prod(*ranges)
+        self.hypotheses = t.cartesian_prod(*ranges).float().to(self.device)
+        self.log_prior = t.full((self.num_hypotheses,), -np.log(self.num_hypotheses), device=self.device, dtype=t.float32)
         self.log_posterior = self.log_prior.clone()
 
     def reset(self):
         self.log_posterior = self.log_prior.clone()
 
     def update_beliefs(self, action, reward):
-        features = self.env.unwrapped.arm_features[action]
-        hypothesised_reward_means = einops.einsum(
-            self.hypotheses.float(),
-            features.float(),
-            "n_hypotheses d_arm, d_arm -> n_hypotheses",
-        )
-
-        log_prior = self.log_posterior
-        log_likelihoods = t.distributions.Normal(
-            loc=hypothesised_reward_means, scale=self.env.unwrapped.sigma_r
-        ).log_prob(t.tensor(reward))
-
-        unnormalised_log_posterior = log_prior + log_likelihoods
-        self.log_posterior = unnormalised_log_posterior - t.logsumexp(
-            unnormalised_log_posterior, dim=0
-        )  # normalise in logspace
+        features = self.env.unwrapped.arm_features[action].to(self.device, dtype=t.float32)
+        reward = t.tensor(reward, device=self.device, dtype=t.float32)
+        hypothesised_reward_means = self.hypotheses @ features
+        
+        log_likelihoods = -0.5 * ((reward - hypothesised_reward_means) / self.env.unwrapped.sigma_r) ** 2
+        log_likelihoods -= t.log(self.env.unwrapped.sigma_r * t.sqrt(t.tensor(2 * np.pi)))
+        unnormalized_log_posterior = self.log_posterior + log_likelihoods
+        self.log_posterior = unnormalized_log_posterior - t.logsumexp(unnormalized_log_posterior, dim=0)
 
     def run_episode(
         self,
@@ -203,18 +198,11 @@ class Boltzmann(Bayesian):
         self.beta = beta
 
     def get_action(self):
-
-        features = self.env.unwrapped.arm_features
+        features = self.env.unwrapped.arm_features.to(self.device, dtype=t.float32)
         posterior = t.exp(self.log_posterior)
-        posterior_mean = einops.einsum(
-            posterior,
-            self.hypotheses.to(t.float32),
-            "n_hypotheses, n_hypotheses d_arm  -> d_arm",
-        )
+        posterior_mean = posterior @ self.hypotheses
 
-        estimated_reward_means = einops.einsum(
-            features.to(t.float32), posterior_mean, "n_arm d_arm, d_arm -> n_arm"
-        )
+        estimated_reward_means = features @ posterior_mean
         probs = t.softmax(self.beta * estimated_reward_means, dim=0)
         probs[self.actions_rejected_this_timestep] = (
             0  # so we don't choose an action that's already been rejected
